@@ -1,0 +1,111 @@
+--- openai/gym/envs/box2d/car_racing.py	2019-09-19 13:14:43.000000000 +0000
++++ car_racing.py	2019-08-09 16:41:23.000000000 +0000
+@@ -1,3 +1,4 @@
++from copy import deepcopy as copy
+ import sys, math
+ import numpy as np
+ 
+@@ -90,6 +91,7 @@
+         if not obj or "tiles" not in obj.__dict__:
+             return
+         if begin:
++            self.env.off_road = False
+             obj.tiles.add(tile)
+             # print tile.road_friction, "ADD", len(obj.tiles)
+             if not tile.road_visited:
+@@ -98,6 +100,8 @@
+                 self.env.tile_visited_count += 1
+         else:
+             obj.tiles.remove(tile)
++            if len(obj.tiles) == 0:
++              self.env.off_road = True
+             # print tile.road_friction, "DEL", len(obj.tiles) -- should delete to zero when on grass (this works)
+ 
+ class CarRacing(gym.Env, EzPickle):
+@@ -119,13 +123,15 @@
+         self.reward = 0.0
+         self.prev_reward = 0.0
+         self.verbose = verbose
+-        self.fd_tile = fixtureDef(
+-                shape = polygonShape(vertices=
+-                    [(0, 0),(1, 0),(1, -1),(0, -1)]))
+ 
+         self.action_space = spaces.Box( np.array([-1,0,0]), np.array([+1,+1,+1]), dtype=np.float32)  # steer, gas, brake
+         self.observation_space = spaces.Box(low=0, high=255, shape=(STATE_H, STATE_W, 3), dtype=np.uint8)
+ 
++        self.off_road = None
++        self.prev_tile_visited_count = None
++        self.succ_rew_bonus = 10.
++        self.crash_rew_penalty = -1.
++
+     def seed(self, seed=None):
+         self.np_random, seed = seeding.np_random(seed)
+         return [seed]
+@@ -271,9 +277,9 @@
+             road1_r = (x1 + TRACK_WIDTH*math.cos(beta1), y1 + TRACK_WIDTH*math.sin(beta1))
+             road2_l = (x2 - TRACK_WIDTH*math.cos(beta2), y2 - TRACK_WIDTH*math.sin(beta2))
+             road2_r = (x2 + TRACK_WIDTH*math.cos(beta2), y2 + TRACK_WIDTH*math.sin(beta2))
+-            vertices = [road1_l, road1_r, road2_r, road2_l]
+-            self.fd_tile.shape.vertices = vertices
+-            t = self.world.CreateStaticBody(fixtures=self.fd_tile)
++            t = self.world.CreateStaticBody( fixtures = fixtureDef(
++                shape=polygonShape(vertices=[road1_l, road1_r, road2_r, road2_l])
++                ))
+             t.userData = t
+             c = 0.01*(i%3)
+             t.color = [ROAD_COLOR[0] + c, ROAD_COLOR[1] + c, ROAD_COLOR[2] + c]
+@@ -296,6 +302,7 @@
+         self._destroy()
+         self.reward = 0.0
+         self.prev_reward = 0.0
++        self.prev_tile_visited_count = 0
+         self.tile_visited_count = 0
+         self.t = 0.0
+         self.road_poly = []
+@@ -308,6 +315,8 @@
+                 print("retry to generate track (normal if there are not many of this messages)")
+         self.car = Car(self.world, *self.track[0][1:4])
+ 
++        self.off_road = False
++
+         return self.step(None)[0]
+ 
+     def step(self, action):
+@@ -322,23 +331,31 @@
+ 
+         self.state = self.render("state_pixels")
+ 
+-        step_reward = 0
++        step_reward = 0.
+         done = False
++        info = {}
+         if action is not None: # First step without action, called from reset()
+             self.reward -= 0.1
+             # We actually don't want to count fuel spent, we want car to be faster.
+             # self.reward -=  10 * self.car.fuel_spent / ENGINE_POWER
+             self.car.fuel_spent = 0.0
+-            step_reward = self.reward - self.prev_reward
++            #step_reward = self.reward - self.prev_reward
+             self.prev_reward = self.reward
+             if self.tile_visited_count==len(self.track):
+                 done = True
+             x, y = self.car.hull.position
+-            if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD:
+-                done = True
+-                step_reward = -100
++            oob = abs(x) > PLAYFIELD or abs(y) > PLAYFIELD
++            done = oob
++            if oob or self.off_road:
++                step_reward = self.crash_rew_penalty
++                info['crash'] = True
++            elif self.tile_visited_count > self.prev_tile_visited_count:
++                step_reward = self.succ_rew_bonus
++                info['succ'] = True
++
++        self.prev_tile_visited_count = copy(self.tile_visited_count)
+ 
+-        return self.state, step_reward, done, {}
++        return self.state, step_reward, done, info
+ 
+     def render(self, mode='human'):
+         assert mode in ['human', 'state_pixels', 'rgb_array']
